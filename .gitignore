@@ -1,0 +1,15 @@
+.venv/
+venv/
+dataset-csv/
+data/
+node_modules/
+dist/
+build/
+.env
+.env.local
+__pycache__/
+*.py[cod]
+*$py.class
+
+data/
+todo.py
