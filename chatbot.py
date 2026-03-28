@@ -175,24 +175,33 @@ def router_node(state: State) -> State:
 
     available_contracts = list_contracts()[:30]  # sample for context
 
-    system = """You are a router for a legal contract analysis system.
-Classify the user message into exactly one intent:
-  - "extract"  : user wants clause(s) extracted from a specific contract
-  - "qa"       : user asks a question about a specific contract
-  - "compare"  : user wants to compare clauses across multiple contracts
-  - "risk"     : user wants risk analysis / flagging of a contract or set of contracts
+    system = """You are an intelligent router for a legal contract analysis system specializing in the CUAD (Contract Understanding Atticus Dataset) dataset.
 
-Also extract:
-  - contract_name  : the single contract name mentioned (or null)
-  - contract_names : list of contract names if multiple mentioned (or [])
-  - clause_type    : specific clause type mentioned (or null)
+Your job is to analyze the user's message and:
+1. Classify it into EXACTLY ONE of these intents:
+   - "extract"  : User wants specific clause(s) extracted/identified from a contract (e.g., "find the indemnification clause", "show me the governing law", "extract all key clauses")
+   - "qa"       : User asks a factual question about a contract's content (e.g., "what can Chase NOT do?", "what are the payment terms?", "who are the parties?")
+   - "compare"  : User wants to compare clauses or terms across 2+ contracts (e.g., "compare liability caps", "which contract has better termination terms?")
+   - "risk"     : User wants risk assessment/flagging (e.g., "is this contract risky?", "flag missing protections", "analyze risk of contract X")
 
-Respond ONLY with valid JSON, no markdown:
+2. Extract these entities (use null/[] if not clearly mentioned):
+   - contract_name  : Single contract name if exactly one is referenced
+   - contract_names : List of contract names if multiple are referenced (for compare/risk)
+   - clause_type    : The specific CUAD clause type if mentioned. Must be one of: Governing Law, Termination for Convenience, Cap on Liability, Non-Compete, IP Ownership Assignment, Revenue/Profit Sharing, Minimum Commitment, Audit Rights, Indemnification, Limitation of Liability, Exclusivity, Non-Solicitation, Change of Control, Renewal Term, Notice Period to Terminate Renewal, Anti-Assignment, License Grant, Warranty Duration, Insurance, Arbitration, Parties, Agreement Date, Effective Date, or null if no specific clause is mentioned.
+
+DECISION RULES:
+- If the user asks "what CAN or CANNOT someone do" → intent is "qa"
+- If the user says "extract", "find", "show me", "list" a clause type → intent is "extract"
+- If the user mentions 2+ contract names → intent is "compare" (unless they say "risk")
+- If the user says "risk", "dangerous", "missing protection", "flag" → intent is "risk"
+- Default to "qa" if ambiguous
+
+Respond ONLY with valid JSON (no markdown, no explanation):
 {
-  "intent": "...",
-  "contract_name": "...",
-  "contract_names": [],
-  "clause_type": "..."
+  "intent": "qa" | "extract" | "compare" | "risk",
+  "contract_name": "exact contract name or null",
+  "contract_names": ["name1", "name2"] or [],
+  "clause_type": "exact clause type from list or null"
 }"""
 
     resp = llm_fast.invoke([
@@ -296,15 +305,39 @@ def extract_node(state: State) -> State:
 
         context = _fmt_chunks(targeted, max_chars=3000)
 
-        system = f"""You are a legal contract analyst. Your task is to find the "{clause}" clause.
+        system = f"""You are an expert legal contract analyst specializing in commercial contracts and the CUAD (Contract Understanding Atticus Dataset) taxonomy.
 
-Respond ONLY with valid JSON:
+Your task: Locate and extract the **"{clause}"** clause from the contract context below.
+
+INSTRUCTIONS:
+1. Search carefully through ALL provided text chunks for this clause.
+2. A clause may appear under different section headings — look for the substance, not just the label.
+3. If the clause is present, extract the EXACT verbatim text (do not paraphrase the extracted_text).
+4. The "explanation" field must be in plain English, suitable for a non-lawyer, covering:
+   - What obligation/right this clause creates
+   - Who benefits from it
+   - Any notable limitations or risks
+5. If the clause is NOT present anywhere in the context, set "present" to false.
+6. NEVER fabricate clause text — only use text that appears verbatim in the context.
+
+CLAUSE DEFINITION — "{clause}":
+- Governing Law: specifies which jurisdiction's laws govern the contract
+- Cap on Liability: limits the maximum financial exposure of a party
+- Termination for Convenience: allows a party to end the contract without cause
+- Indemnification: requires one party to compensate the other for specified losses
+- Non-Compete: restricts a party from competing in certain markets/timeframes
+- Arbitration: requires disputes to be resolved through arbitration, not courts
+- IP Ownership Assignment: transfers intellectual property rights between parties
+- Audit Rights: grants a party the right to inspect the other's books/records
+- Use the standard legal definition for any other clause type.
+
+Respond ONLY with valid JSON (no markdown fences, no extra text):
 {{
-  "present": true/false,
-  "extracted_text": "exact verbatim text of the clause (max 300 words) or null",
-  "page": page_number_integer_or_null,
-  "section": "section reference like '4.3' or null",
-  "explanation": "plain English explanation of what this clause means and its implications (2-3 sentences)"
+  "present": true or false,
+  "extracted_text": "verbatim text from the contract (max 400 words) or null if absent",
+  "page": integer page number where clause appears, or null,
+  "section": "section number like '4.3' or heading like 'ARTICLE VIII' or null",
+  "explanation": "2-4 sentence plain English explanation of what this clause means, who it protects, and any notable risks or implications"
 }}"""
 
         resp = llm_strong.invoke([
@@ -347,13 +380,24 @@ def compare_risk_node(state: State) -> State:
     for contract_name, chunks in cross_chunks.items():
         context   = _fmt_chunks(chunks, max_chars=2500)
         clause_q  = ", ".join(target_clauses)
-        system    = f"""You are a legal analyst. For each of these clause types:
+        system    = f"""You are a senior legal analyst specializing in commercial contract review and the CUAD taxonomy.
+
+Your task: For the contract text provided, analyze each of the following clause types and determine whether each is present:
 {clause_q}
 
-Respond ONLY with JSON mapping clause name to extraction result:
+INSTRUCTIONS:
+1. For each clause type, carefully read ALL provided context chunks.
+2. Mark "present": true only if the clause is clearly expressed in the contract text.
+3. If present, write a concise 1-sentence summary of what the clause says (specific details, not generic).
+4. If absent, set "present": false and "summary": null.
+5. Do NOT assume a clause exists because it is common — only report what you find in the text.
+6. Be specific in summaries: include party names, dollar amounts, time periods, or jurisdiction names when found.
+
+FORMAT: Respond ONLY with valid JSON (no markdown, no extra text). Include ALL requested clause types:
 {{
-  "Governing Law": {{"present": bool, "summary": "1-sentence summary or null"}},
-  ...
+  "Governing Law": {{"present": true/false, "summary": "e.g. Governed by the laws of New York State" or null}},
+  "Cap on Liability": {{"present": true/false, "summary": "e.g. Liability capped at total fees paid in prior 12 months" or null}},
+  ... (one entry for every clause in the list above)
 }}"""
         resp = llm_strong.invoke([
             SystemMessage(content=system),
@@ -462,10 +506,31 @@ def answer_node(state: State) -> State:
         context = _fmt_chunks(chunks, max_chars=5000)
         history = state["messages"][:-1][-4:]  # last 4 turns for context
 
-        system = """You are a legal contract analyst. Answer the question based ONLY on the provided contract text.
-Always cite the exact page number and contract name when referencing specific clauses.
-If the answer is not found in the context, say so clearly — do not hallucinate.
-Format: concise answer first, then supporting quote with citation."""
+        system = """You are an expert legal contract analyst with deep expertise in commercial contracts, CUAD clause taxonomy, and legal risk assessment.
+
+Your task: Answer the user's question based STRICTLY on the provided contract text chunks.
+
+CORE RULES:
+1. GROUNDING: Every factual claim MUST be traceable to the provided context. Never invent facts.
+2. CITATIONS: Always cite the source using this format: (Contract: [name], Page [N], Section [X]) — include all three if available.
+3. HONESTY: If the answer is not in the provided context, say clearly: "The provided contract sections do not contain information about [topic]. You may need to review additional sections."
+4. NO HALLUCINATION: Do not fill gaps with general legal knowledge — only use what's in the retrieved text.
+5. MULTI-CHUNK: If relevant information spans multiple chunks, synthesize them into a coherent answer.
+
+FORMATTING GUIDELINES:
+- Start with a direct, 1-2 sentence answer to the question.
+- Follow with supporting evidence: use block quotes (>) for verbatim contract text.
+- End with a brief legal interpretation if the clause has nuanced implications.
+- Use plain English — avoid unnecessary legal jargon.
+- If multiple contracts are in context, clearly attribute each finding to the correct contract.
+
+EXAMPLE FORMAT:
+**Answer:** [Direct answer to the question]
+
+**Supporting evidence** (Contract: ABC Corp, Page 12, Section 4.3):
+> "[verbatim relevant contract text]"
+
+**Interpretation:** [What this means practically for the parties involved]"""
 
         resp = llm_strong.invoke([
             SystemMessage(content=system),
@@ -500,11 +565,28 @@ def grade_node(state: State) -> State:
 
     context = _fmt_chunks(chunks[:4], max_chars=2000)
 
-    system = """Grade this answer on:
-1. Groundedness (0-1): Is every factual claim supported by the context?
-2. Relevance (0-1): Does the answer address the question?
+    system = """You are a quality evaluator for a legal contract Q&A system. Grade the given answer on two dimensions:
 
-Respond ONLY with JSON: {"groundedness": 0.0, "relevance": 0.0, "reason": "..."}"""
+1. **Groundedness** (0.0 to 1.0):
+   - 1.0: Every factual claim is explicitly supported by the provided contract context
+   - 0.7-0.9: Most claims are grounded; minor extrapolations present
+   - 0.4-0.6: Some claims lack support or contradict the context
+   - 0.0-0.3: Answer is largely fabricated or contradicts the context
+
+2. **Relevance** (0.0 to 1.0):
+   - 1.0: Answer directly and completely addresses the user's question
+   - 0.7-0.9: Answer is mostly relevant but misses some aspect of the question
+   - 0.4-0.6: Answer is tangentially related but doesn't fully address the question
+   - 0.0-0.3: Answer is off-topic or completely misses the question
+
+GRADING RULES:
+- Penalize heavily for any fabricated citations, page numbers, or contract names not in the context
+- Penalize if the answer claims information is absent when it IS present in the context
+- Do NOT penalize for correctly saying "not found" when the context truly doesn't contain the answer
+- A response that says "not found" when context doesn't support an answer should score 1.0 groundedness
+
+Respond ONLY with valid JSON:
+{"groundedness": 0.0, "relevance": 0.0, "reason": "Concise explanation of scores in 1-2 sentences"}"""
 
     resp = llm_fast.invoke([
         SystemMessage(content=system),
