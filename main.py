@@ -122,4 +122,7 @@ with gr.Blocks(title="System Configuration & Runner") as app:
             chat_btn.click(fn=run_chat, outputs=action_out)
 
 if __name__ == "__main__":
-    app.launch()
+    app.launch(
+        inbrowser=True,
+        theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="slate"),
+    )
